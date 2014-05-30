@@ -27,6 +27,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class ThreadDeathWatcher {
 
@@ -34,14 +35,10 @@ public final class ThreadDeathWatcher {
     private static final ThreadFactory threadFactory =
             new DefaultThreadFactory(ThreadDeathWatcher.class, true, Thread.MIN_PRIORITY);
 
-    private static final int ST_NOT_STARTED = 1;
-    private static final int ST_STARTED = 2;
-
     private static final Queue<Entry> pendingEntries = PlatformDependent.newMpscQueue();
     private static final Watcher watcher = new Watcher();
 
-    private static final Object stateLock = new Object();
-    private static int state = ST_NOT_STARTED;
+    private static final AtomicBoolean queueState = new AtomicBoolean();
 
     public static void watch(Thread thread, Runnable task) {
         if (thread == null) {
@@ -56,12 +53,9 @@ public final class ThreadDeathWatcher {
 
         pendingEntries.add(new Entry(thread, task));
 
-        synchronized (stateLock) {
-            if (state == ST_NOT_STARTED) {
-                state = ST_STARTED;
-                Thread watcherThread = threadFactory.newThread(watcher);
-                watcherThread.start();
-            }
+        if (queueState.compareAndSet(false, true)) {
+            Thread watcherThread = threadFactory.newThread(watcher);
+            watcherThread.start();
         }
     }
 
@@ -84,12 +78,10 @@ public final class ThreadDeathWatcher {
                 }
 
                 if (watchees.isEmpty() && pendingEntries.isEmpty()) {
-                    synchronized (stateLock) {
-                        // Terminate if there is no task in the queue (except the purge task).
-                        if (pendingEntries.isEmpty()) {
-                            state = ST_NOT_STARTED;
-                            break;
-                        }
+                    queueState.set(false);
+
+                    if (pendingEntries.isEmpty() || !queueState.compareAndSet(false, true)) {
+                        break;
                     }
                 }
             }
